@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - development
+  push:
+    branches:
+      - feature/environment-migration
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Compile Python
+        run: python -m py_compile scripts/migrate_environment.py
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v

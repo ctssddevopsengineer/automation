@@ -1,0 +1,251 @@
+name: Migrate GitHub Environment Configuration
+
+run-name: >-
+  Migrate ${{ inputs.migration_type }}:
+  ${{ inputs.organization }}/${{ inputs.repository_name }}
+  [${{ inputs.from_environment }} -> ${{ inputs.to_environment }}]
+
+on:
+  workflow_dispatch:
+    inputs:
+      organization:
+        description: GitHub organization or repository owner
+        required: true
+        type: string
+      repository_name:
+        description: Repository name
+        required: true
+        type: string
+      from_environment:
+        description: Source environment
+        required: true
+        type: string
+      to_environment:
+        description: Target environment
+        required: true
+        type: string
+      migration_type:
+        description: What should be migrated?
+        required: true
+        default: vars
+        type: choice
+        options:
+          - vars
+          - secrets
+          - both
+      overwrite:
+        description: Overwrite values that already exist in the target environment
+        required: true
+        default: false
+        type: boolean
+      dry_run:
+        description: Preview changes without modifying the target environment
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    environment-migration-${{ inputs.organization }}-${{ inputs.repository_name }}-
+    ${{ inputs.to_environment }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate request
+    runs-on: ubuntu-latest
+    outputs:
+      repo_full_name: ${{ steps.meta.outputs.repo_full_name }}
+      migrate_vars: ${{ steps.meta.outputs.migrate_vars }}
+      migrate_secrets: ${{ steps.meta.outputs.migrate_secrets }}
+    steps:
+      - name: Checkout automation repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Validate inputs and environments
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.CTSSDDEVOPSENGINEER_PAT_NOEXPIRY }}
+        run: |
+          python scripts/migrate_environment.py validate \
+            --organization "${{ inputs.organization }}" \
+            --repository "${{ inputs.repository_name }}" \
+            --from-environment "${{ inputs.from_environment }}" \
+            --to-environment "${{ inputs.to_environment }}" \
+            --migration-type "${{ inputs.migration_type }}" \
+            --current-repository "${{ github.repository }}" \
+            --github-output "$GITHUB_OUTPUT"
+
+  migrate-vars:
+    name: Migrate environment variables
+    needs: validate
+    if: needs.validate.outputs.migrate_vars == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout automation repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Copy variables
+        env:
+          GH_TOKEN: ${{ secrets.CTSSDDEVOPSENGINEER_PAT_NOEXPIRY }}
+        run: |
+          args=(
+            copy-vars
+            --organization "${{ inputs.organization }}"
+            --repository "${{ inputs.repository_name }}"
+            --from-environment "${{ inputs.from_environment }}"
+            --to-environment "${{ inputs.to_environment }}"
+          )
+
+          if [[ "${{ inputs.overwrite }}" == "true" ]]; then
+            args+=(--overwrite)
+          fi
+
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+
+          python scripts/migrate_environment.py "${args[@]}"
+
+  discover-secrets:
+    name: Discover source secret names
+    needs: validate
+    if: needs.validate.outputs.migrate_secrets == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      secret_names: ${{ steps.list.outputs.secret_names }}
+    steps:
+      - name: Checkout automation repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: List environment secret names
+        id: list
+        env:
+          GH_TOKEN: ${{ secrets.CTSSDDEVOPSENGINEER_PAT_NOEXPIRY }}
+        run: |
+          secret_names="$(
+            python scripts/migrate_environment.py list-secret-names \
+              --organization "${{ inputs.organization }}" \
+              --repository "${{ inputs.repository_name }}" \
+              --environment "${{ inputs.from_environment }}"
+          )"
+
+          # An empty matrix can be awkward to reason about. Use a harmless sentinel
+          # so the workflow clearly reports that there was nothing to migrate.
+          if [[ "$secret_names" == "[]" ]]; then
+            secret_names='["__NO_SECRETS__"]'
+          fi
+
+          echo "secret_names=$secret_names" >> "$GITHUB_OUTPUT"
+
+  migrate-secrets:
+    name: Migrate secret - ${{ matrix.secret_name }}
+    needs:
+      - validate
+      - discover-secrets
+    if: needs.validate.outputs.migrate_secrets == 'true'
+    runs-on: ubuntu-latest
+
+    # This environment attachment is what allows Actions to release the
+    # plaintext source environment secret to the job. For that reason,
+    # secret migration is intentionally limited to the repository in which
+    # this workflow is running.
+    environment:
+      name: ${{ inputs.from_environment }}
+      deployment: false
+
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        secret_name: ${{ fromJSON(needs.discover-secrets.outputs.secret_names) }}
+
+    steps:
+      - name: Nothing to migrate
+        if: matrix.secret_name == '__NO_SECRETS__'
+        run: echo "The source environment has no environment secrets."
+
+      - name: Checkout automation repository
+        if: matrix.secret_name != '__NO_SECRETS__'
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        if: matrix.secret_name != '__NO_SECRETS__'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install secret encryption dependency
+        if: matrix.secret_name != '__NO_SECRETS__' && inputs.dry_run == false
+        run: python -m pip install --disable-pip-version-check --no-cache-dir 'PyNaCl==1.5.0'
+
+      - name: Copy secret
+        if: matrix.secret_name != '__NO_SECRETS__'
+        env:
+          GH_TOKEN: ${{ secrets.CTSSDDEVOPSENGINEER_PAT_NOEXPIRY }}
+          SOURCE_SECRET_VALUE: ${{ secrets[matrix.secret_name] }}
+        run: |
+          args=(
+            copy-secret
+            --organization "${{ inputs.organization }}"
+            --repository "${{ inputs.repository_name }}"
+            --to-environment "${{ inputs.to_environment }}"
+            --secret-name "${{ matrix.secret_name }}"
+          )
+
+          if [[ "${{ inputs.overwrite }}" == "true" ]]; then
+            args+=(--overwrite)
+          fi
+
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+
+          python scripts/migrate_environment.py "${args[@]}"
+
+  summary:
+    name: Migration summary
+    needs:
+      - validate
+      - migrate-vars
+      - discover-secrets
+      - migrate-secrets
+    if: always() && needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write summary
+        run: |
+          {
+            echo "## Environment migration"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Repository | \`${{ inputs.organization }}/${{ inputs.repository_name }}\` |"
+            echo "| Source | \`${{ inputs.from_environment }}\` |"
+            echo "| Target | \`${{ inputs.to_environment }}\` |"
+            echo "| Type | \`${{ inputs.migration_type }}\` |"
+            echo "| Overwrite | \`${{ inputs.overwrite }}\` |"
+            echo "| Dry run | \`${{ inputs.dry_run }}\` |"
+            echo
+            echo "Variables job: **${{ needs.migrate-vars.result }}**"
+            echo
+            echo "Secrets job: **${{ needs.migrate-secrets.result }}**"
+          } >> "$GITHUB_STEP_SUMMARY"
