@@ -73,7 +73,7 @@ jobs:
       - name: Validate inputs and environments
         id: meta
         env:
-          GH_TOKEN: ${{ secrets.ENV_MIGRATION_TOKEN }}
+          GH_TOKEN: ${{ secrets.CTSSDDEVOPSENGINEER_PAT_NOEXPIRY }}
         run: |
           python scripts/migrate_environment.py validate \
             --organization "${{ inputs.organization }}" \
@@ -100,7 +100,7 @@ jobs:
 
       - name: Copy variables
         env:
-          GH_TOKEN: ${{ secrets.ENV_MIGRATION_TOKEN }}
+          GH_TOKEN: ${{ secrets.CTSSDDEVOPSENGINEER_PAT_NOEXPIRY }}
         run: |
           args=(
             copy-vars
@@ -139,7 +139,7 @@ jobs:
       - name: List environment secret names
         id: list
         env:
-          GH_TOKEN: ${{ secrets.ENV_MIGRATION_TOKEN }}
+          GH_TOKEN: ${{ secrets.CTSSDDEVOPSENGINEER_PAT_NOEXPIRY }}
         run: |
           secret_names="$(
             python scripts/migrate_environment.py list-secret-names \
@@ -200,7 +200,7 @@ jobs:
       - name: Copy secret
         if: matrix.secret_name != '__NO_SECRETS__'
         env:
-          GH_TOKEN: ${{ secrets.ENV_MIGRATION_TOKEN }}
+          GH_TOKEN: ${{ secrets.CTSSDDEVOPSENGINEER_PAT_NOEXPIRY }}
           SOURCE_SECRET_VALUE: ${{ secrets[matrix.secret_name] }}
         run: |
           args=(
